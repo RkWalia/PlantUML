@@ -12,6 +12,9 @@ class PlantUMLRenderer {
     const lines = code.split('\n').map(line => line.trim()).filter(line => line)
     const diagramType = this.detectDiagramType(lines)
     
+    console.log('Detected diagram type:', diagramType)
+    console.log('Lines:', lines)
+    
     switch (diagramType) {
       case 'sequence':
         return this.renderSequenceDiagram(lines)
@@ -35,26 +38,40 @@ class PlantUMLRenderer {
   static detectDiagramType(lines) {
     const codeStr = lines.join(' ').toLowerCase()
     
+    console.log('Code string for detection:', codeStr)
+    
+    // Check for specific diagram markers first
     if (codeStr.includes('@startmindmap') || codeStr.includes('@endmindmap')) {
       return 'mindmap'
     }
     if (codeStr.includes('@startgantt') || codeStr.includes('@endgantt')) {
       return 'gantt'
     }
-    if (codeStr.includes('->') || codeStr.includes('<-') || codeStr.includes('participant')) {
-      return 'sequence'
+    
+    // Check for component diagrams BEFORE sequence diagrams
+    // Component diagrams have packages and components in brackets
+    if (codeStr.includes('package') && (codeStr.includes('[') && codeStr.includes(']'))) {
+      return 'component'
     }
+    
+    // Check for class diagrams
     if (codeStr.includes('class ') || codeStr.includes('<|--') || codeStr.includes('--|>')) {
       return 'class'
     }
+    
+    // Check for use case diagrams
     if (codeStr.includes('actor') || codeStr.includes('usecase') || codeStr.includes('rectangle')) {
       return 'usecase'
     }
+    
+    // Check for activity diagrams
     if ((codeStr.includes('start') && codeStr.includes('stop')) || codeStr.includes('if (') || codeStr.includes('endif')) {
       return 'activity'
     }
-    if (codeStr.includes('package') || codeStr.includes('component') || codeStr.includes('[') && codeStr.includes(']')) {
-      return 'component'
+    
+    // Check for sequence diagrams LAST (since they also use arrows)
+    if (codeStr.includes('->') || codeStr.includes('<-') || codeStr.includes('participant')) {
+      return 'sequence'
     }
     
     return 'generic'
@@ -394,32 +411,80 @@ class PlantUMLRenderer {
   }
 
   static renderComponentDiagram(lines) {
-    const components = []
+    console.log('Rendering component diagram with lines:', lines)
+    
+    const components = new Map() // Map to store component name -> alias mapping
     const packages = []
     const connections = []
+    let currentPackage = null
 
     lines.forEach(line => {
       if (line.startsWith('@') || !line) return
+      
+      console.log('Processing line:', line)
 
+      // Handle closing braces
+      if (line === '}') {
+        currentPackage = null
+        return
+      }
+
+      // Parse package declarations
       const packageMatch = line.match(/package\s+"([^"]+)"\s*{?/)
       if (packageMatch) {
-        packages.push(packageMatch[1])
+        currentPackage = packageMatch[1]
+        packages.push({ name: currentPackage, components: [] })
+        console.log('Found package:', currentPackage)
         return
       }
 
-      const componentMatch = line.match(/\[([^\]]+)\]/)
+      // Parse component declarations with optional aliases
+      const componentMatch = line.match(/\[([^\]]+)\](?:\s+as\s+(\w+))?/)
       if (componentMatch) {
-        components.push(componentMatch[1])
+        const componentName = componentMatch[1]
+        const alias = componentMatch[2] || componentName
+        
+        console.log('Found component:', componentName, 'with alias:', alias)
+        
+        // Store the mapping
+        components.set(alias, componentName)
+        components.set(componentName, componentName) // Also map full name to itself
+        
+        // Add to current package if we're inside one
+        if (currentPackage) {
+          const pkg = packages.find(p => p.name === currentPackage)
+          if (pkg) {
+            pkg.components.push({ name: componentName, alias })
+          }
+        } else {
+          // Standalone component
+          packages.push({ name: null, components: [{ name: componentName, alias }] })
+        }
         return
       }
 
-      const connectionMatch = line.match(/(\w+|\[[^\]]+\])\s*-->\s*(\w+|\[[^\]]+\])/)
+      // Parse connections - handle both aliases and full names
+      const connectionMatch = line.match(/(\w+|\[[^\]]+\])\s*(-->|->|--)\s*(\w+|\[[^\]]+\])/)
       if (connectionMatch) {
-        connections.push({ from: connectionMatch[1], to: connectionMatch[2] })
+        let from = connectionMatch[1].replace(/[\[\]]/g, '') // Remove brackets if present
+        let to = connectionMatch[3].replace(/[\[\]]/g, '')
+        
+        console.log('Found connection:', from, '->', to)
+        
+        connections.push({ 
+          from: from, 
+          to: to,
+          fromAlias: from,
+          toAlias: to
+        })
       }
     })
 
-    const width = 800
+    console.log('Final packages:', packages)
+    console.log('Final components map:', components)
+    console.log('Final connections:', connections)
+
+    const width = Math.max(800, packages.length * 350)
     const height = 600
 
     let svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
@@ -431,24 +496,73 @@ class PlantUMLRenderer {
       <rect width="100%" height="100%" fill="white" stroke="#ddd" stroke-width="1"/>
     `
 
-    // Draw packages
-    packages.forEach((pkg, i) => {
-      const x = 50 + (i % 2) * 350
-      const y = 50 + Math.floor(i / 2) * 200
-      svg += `
-        <rect x="${x}" y="${y}" width="300" height="150" fill="#f3e5f5" stroke="#9c27b0" stroke-width="2" stroke-dasharray="5,5"/>
-        <text x="${x + 10}" y="${y + 20}" font-family="Arial" font-size="14" font-weight="bold">${pkg}</text>
-      `
+    const componentPositions = new Map()
+
+    // Draw packages and components
+    packages.forEach((pkg, pkgIndex) => {
+      if (pkg.name) {
+        // Draw package container
+        const pkgX = 50 + pkgIndex * 350
+        const pkgY = 50
+        const pkgWidth = 300
+        const pkgHeight = 200
+
+        svg += `
+          <rect x="${pkgX}" y="${pkgY}" width="${pkgWidth}" height="${pkgHeight}" 
+                fill="#f3e5f5" stroke="#9c27b0" stroke-width="2" stroke-dasharray="5,5" rx="10"/>
+          <text x="${pkgX + 10}" y="${pkgY + 25}" font-family="Arial" font-size="16" font-weight="bold" fill="#9c27b0">${pkg.name}</text>
+        `
+
+        // Draw components inside package
+        pkg.components.forEach((comp, compIndex) => {
+          const compX = pkgX + 20 + (compIndex % 2) * 130
+          const compY = pkgY + 50 + Math.floor(compIndex / 2) * 70
+          
+          componentPositions.set(comp.alias, { x: compX + 60, y: compY + 25 })
+          componentPositions.set(comp.name, { x: compX + 60, y: compY + 25 })
+
+          svg += `
+            <rect x="${compX}" y="${compY}" width="120" height="50" 
+                  fill="#e8f5e8" stroke="#4caf50" stroke-width="2" rx="5"/>
+            <text x="${compX + 60}" y="${compY + 30}" text-anchor="middle" 
+                  font-family="Arial" font-size="11" font-weight="bold">${comp.name}</text>
+          `
+        })
+      } else {
+        // Standalone components
+        pkg.components.forEach((comp, compIndex) => {
+          const compX = 50 + compIndex * 150
+          const compY = 300
+          
+          componentPositions.set(comp.alias, { x: compX + 60, y: compY + 25 })
+          componentPositions.set(comp.name, { x: compX + 60, y: compY + 25 })
+
+          svg += `
+            <rect x="${compX}" y="${compY}" width="120" height="50" 
+                  fill="#e3f2fd" stroke="#2196f3" stroke-width="2" rx="5"/>
+            <text x="${compX + 60}" y="${compY + 30}" text-anchor="middle" 
+                  font-family="Arial" font-size="11" font-weight="bold">${comp.name}</text>
+          `
+        })
+      }
     })
 
-    // Draw components
-    components.forEach((comp, i) => {
-      const x = 100 + (i % 3) * 200
-      const y = 150 + Math.floor(i / 3) * 100
-      svg += `
-        <rect x="${x}" y="${y}" width="120" height="60" fill="#e8f5e8" stroke="#4caf50" stroke-width="2"/>
-        <text x="${x + 60}" y="${y + 35}" text-anchor="middle" font-family="Arial" font-size="12">${comp}</text>
-      `
+    console.log('Component positions:', componentPositions)
+
+    // Draw connections
+    connections.forEach(conn => {
+      const fromPos = componentPositions.get(conn.fromAlias) || componentPositions.get(conn.from)
+      const toPos = componentPositions.get(conn.toAlias) || componentPositions.get(conn.to)
+      
+      console.log('Drawing connection from', conn.from, 'to', conn.to)
+      console.log('From position:', fromPos, 'To position:', toPos)
+      
+      if (fromPos && toPos) {
+        svg += `
+          <line x1="${fromPos.x}" y1="${fromPos.y}" x2="${toPos.x}" y2="${toPos.y}" 
+                stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+        `
+      }
     })
 
     svg += '</svg>'
